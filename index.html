@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ABC AR Adventure Game for Kids</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@300..700&display=swap" rel="stylesheet">
+    <link rel="manifest" href="data:application/json;charset=utf-8,%7B%22name%22%3A%22ABC%20AR%20Adventure%22%2C%22short_name%22%3A%22ABC%20AR%22%2C%22start_url%22%3A%22index.html%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22landscape%22%2C%22background_color%22%3A%22%23a6c1ee%22%2C%22theme_color%22%3A%22%23FF4A82%22%7D">
+	
+    <style>
+        body {
+            font-family: 'Fredoka', sans-serif;
+            background: linear-gradient(135deg, #fbc2eb 0%, #a6c1ee 100%);
+            overflow: hidden;
+        }
+        #webcam {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            visibility: hidden;
+        }
+        #gameCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body class="w-screen h-screen flex items-center justify-center m-0 p-0 select-none">
+
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="handOverlayAlert" class="absolute top-5 left-1/2 transform -translate-x-1/2 z-50 pointer-events-none hidden">
+        <div class="bg-red-500/80 text-white font-bold px-6 py-3 rounded-full shadow-lg text-lg animate-bounce flex items-center gap-2 backdrop-blur-sm">
+            <span>✋</span> Looking for your hand... (You can also use a mouse!)
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const video = document.getElementById('webcam');
+        const handAlert = document.getElementById('handOverlayAlert');
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // --- Game State & Data ---
+        let gameState = 'START'; 
+        let score = 0;
+        let currentRound = 1;
+        const totalRounds = 5;
+        let roundStartTime = 0;
+        
+        let targetLetter = ''; 
+        let options = []; 
+        let draggedElement = null; 
+        let letterMode = 'UPPER'; 
+        let difficulty = 'EASY'; 
+        
+        // ระบบนับการตอบถูกต่อเนื่อง
+        let correctStreak = 0;
+
+        // คลังประโยคชมเชยแบ่งตามระดับความตื่นเต้น (ตามจำนวน Streak)
+        const praisePhrases = {
+            low: [
+                "Good job!", 
+                "Correct! Nice work.", 
+                "You got it!"
+            ],
+            medium: [
+                "Wonderful! You are doing great!", 
+                "Amazing! Keep it up!", 
+                "Excellent! You are so smart!"
+            ],
+            high: [
+                "Unbelievable! You are a superstar!", 
+                "Spectacular! Absolutely perfect!", 
+                "Wow! Phenomenal streak! You are unstoppable!"
+            ]
+        };
+
+        // Slower Speech & Gentle Female American Voice Setup
+        function speak(text, customRate = null) {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'en-US';
+                
+                // กำหนดความเร็วเสียงเริ่มต้น (ถ้าเป็นตัวอักษรเดี่ยวจะช้าเป็นพิเศษ)
+                if (customRate) {
+                    utterance.rate = customRate;
+                } else if (text.length === 1) {
+                    utterance.rate = 0.45; 
+                } else {
+                    utterance.rate = 0.65; 
+                }
+                
+                // ปรับ Pitch ให้สูงขึ้นตาม Streak เพื่อเพิ่มความตื่นเต้นและสดใส
+                let basePitch = 1.15;
+                if (correctStreak >= 2 && correctStreak < 4) basePitch = 1.25;
+                if (correctStreak >= 4) basePitch = 1.35;
+                utterance.pitch = basePitch;
+
+                const voices = window.speechSynthesis.getVoices();
+                const femaleUSVoice = voices.find(voice => 
+                    voice.lang.includes('en-US') && 
+                    (voice.name.toLowerCase().includes('female') || 
+                     voice.name.toLowerCase().includes('zira') || 
+                     voice.name.toLowerCase().includes('samantha') || 
+                     voice.name.toLowerCase().includes('google us english'))
+                );
+                
+                if (femaleUSVoice) {
+                    utterance.voice = femaleUSVoice;
+                }
+                
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+        
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.onvoiceschanged = () => {};
+        }
+
+        const alphabetPairs = [
+            { upper: 'A', lower: 'a' }, { upper: 'B', lower: 'b' }, { upper: 'C', lower: 'c' },
+            { upper: 'D', lower: 'd' }, { upper: 'E', lower: 'e' }, { upper: 'F', lower: 'f' },
+            { upper: 'G', lower: 'g' }, { upper: 'H', lower: 'h' }, { upper: 'I', lower: 'i' },
+            { upper: 'J', lower: 'j' }, { upper: 'K', lower: 'k' }, { upper: 'L', lower: 'l' },
+            { upper: 'M', lower: 'm' }, { upper: 'N', lower: 'n' }, { upper: 'O', lower: 'o' },
+            { upper: 'P', lower: 'p' }, { upper: 'Q', lower: 'q' }, { upper: 'R', lower: 'r' },
+            { upper: 'S', lower: 's' }, { upper: 'T', lower: 't' }, { upper: 'U', lower: 'u' },
+            { upper: 'V', lower: 'v' }, { upper: 'W', lower: 'w' }, { upper: 'X', lower: 'x' },
+            { upper: 'Y', lower: 'y' }, { upper: 'Z', lower: 'z' }
+        ];
+
+        // --- Buttons & Interactive Elements Dimensions ---
+        let buttons = {
+            startBtn: { x: 0, y: 0, w: 260, h: 80, text: 'Start Game' },
+            modeUpperBtn: { x: 0, y: 0, w: 220, h: 90, text: 'A-Z' },
+            modeLowerBtn: { x: 0, y: 0, w: 220, h: 90, text: 'a-z' },
+            diffEasyBtn: { x: 0, y: 0, w: 180, h: 70, text: 'Easy' },
+            diffMedBtn: { x: 0, y: 0, w: 180, h: 70, text: 'Medium' },
+            diffHardBtn: { x: 0, y: 0, w: 180, h: 70, text: 'Hard' },
+            nextBtn: { x: 0, y: 0, w: 220, h: 70, text: 'Let\'s Go! ➔' },
+            audioBtn: { x: 0, y: 0, w: 180, h: 60, text: '🔊 Repeat' }
+        };
+
+        let dropZone = { x: 0, y: 0, w: 260, h: 200 }; 
+        const SNAP_DISTANCE = 100;
+
+        // --- Hand Tracking & Cursor Data ---
+        let handDetected = false;
+        let lastHandSeenTime = 0;
+        let pointerX = 0, pointerY = 0; 
+        let isPinching = false; 
+        let cursorStatus = 'NORMAL'; 
+        let rawHandResults = null;
+
+        // Mouse/Touch Fallback
+        let isMouseDown = false;
+        window.addEventListener('mousemove', (e) => {
+            pointerX = e.clientX;
+            pointerY = e.clientY;
+            lastHandSeenTime = Date.now(); 
+        });
+        window.addEventListener('mousedown', () => { isMouseDown = true; isPinching = true; });
+        window.addEventListener('mouseup', () => {
+            isMouseDown = false;
+            isPinching = false;
+            if (draggedElement) checkDropSuccess();
+        });
+
+        // --- Initialize New Round ---
+        function initRound() {
+            roundStartTime = Date.now();
+            let pair = alphabetPairs[Math.floor(Math.random() * alphabetPairs.length)];
+            targetLetter = (letterMode === 'UPPER') ? pair.upper : pair.lower;
+
+            let cardCount = 3;
+            if (difficulty === 'MEDIUM') cardCount = 6;
+            if (difficulty === 'HARD') cardCount = 10;
+
+            let choices = [targetLetter];
+            while(choices.length < cardCount) {
+                let p = alphabetPairs[Math.floor(Math.random() * alphabetPairs.length)];
+                let l = (letterMode === 'UPPER') ? p.upper : p.lower;
+                if(!choices.includes(l)) choices.push(l);
+            }
+            choices.sort(() => Math.random() - 0.5);
+
+            options = [];
+            let cols = 3;
+            let rows = 1;
+            
+            if (difficulty === 'MEDIUM') { cols = 3; rows = 2; }
+            if (difficulty === 'HARD') { cols = 5; rows = 2; }
+
+            let cardW = 120;
+            let cardH = 150;
+            let gapX = 30;
+            let gapY = 20;
+
+            if (difficulty === 'HARD') {
+                cardW = 100;
+                cardH = 130;
+                gapX = 20;
+            }
+
+            let totalGridW = (cols * cardW) + ((cols - 1) * gapX);
+            let startX = (canvas.width - totalGridW) / 2;
+            let startY = 130;
+
+            choices.forEach((char, index) => {
+                let r = Math.floor(index / cols);
+                let c = index % cols;
+                let originalX = startX + (c * (cardW + gapX));
+                let originalY = startY + (r * (cardH + gapY));
+
+                options.push({
+                    char: char,
+                    x: originalX,
+                    y: originalY,
+                    ox: originalX, 
+                    oy: originalY,
+                    w: cardW,
+                    h: cardH,
+                    ow: cardW,    
+                    oh: cardH,
+                    color: `hsl(${(index * (360 / cardCount))}, 85%, 65%)`,
+                    isTarget: char === targetLetter,
+                    offsetX: 0,
+                    offsetY: 0,
+                    isSnapped: false
+                });
+            });
+
+            draggedElement = null;
+            setTimeout(() => { speak(`Find the letter ${targetLetter}`); }, 600);
+        }
+
+        // --- Core Game Logic Verification ---
+        function checkDropSuccess() {
+            if (!draggedElement) return;
+
+            let cardCenterX = draggedElement.x + draggedElement.w / 2;
+            let cardCenterY = draggedElement.y + draggedElement.h / 2;
+            let zoneCenterX = dropZone.x + dropZone.w / 2;
+            let zoneCenterY = dropZone.y + dropZone.h / 2;
+
+            let distToCenter = Math.sqrt(Math.pow(cardCenterX - zoneCenterX, 2) + Math.pow(cardCenterY - zoneCenterY, 2));
+
+            if (distToCenter < SNAP_DISTANCE || draggedElement.isSnapped) {
+                if (draggedElement.isTarget) {
+                    draggedElement.isSnapped = true;
+                    draggedElement.x = dropZone.x;
+                    draggedElement.y = dropZone.y;
+                    draggedElement.w = dropZone.w;
+                    draggedElement.h = dropZone.h;
+
+                    // เพิ่มจำนวนคอมโบ Streak ตอบถูกต่อเนื่อง
+                    correctStreak++;
+
+                    let timeTaken = (Date.now() - roundStartTime) / 1000;
+                    let roundScore = Math.max(30, Math.round(100 - (timeTaken * 2.5)));
+                    score += roundScore;
+                    cursorStatus = 'SUCCESS';
+
+                    // สุ่มดึงเสียงประโยคชมเชยตามระดับ Streak
+                    let selectedPhrase = "";
+                    if (correctStreak <= 1) {
+                        selectedPhrase = praisePhrases.low[Math.floor(Math.random() * praisePhrases.low.length)];
+                    } else if (correctStreak >= 2 && correctStreak <= 3) {
+                        selectedPhrase = praisePhrases.medium[Math.floor(Math.random() * praisePhrases.medium.length)];
+                    } else {
+                        selectedPhrase = praisePhrases.high[Math.floor(Math.random() * praisePhrases.high.length)];
+                    }
+
+                    // เพิ่มคำว่า "Streak!" ต่อท้ายถ้าทำคอมโบได้เยอะๆ
+                    if (correctStreak >= 2) {
+                        selectedPhrase += ` That's a ${correctStreak} answer streak!`;
+                    }
+
+                    speak(selectedPhrase);
+                    
+                    setTimeout(() => {
+                        if (currentRound < totalRounds) {
+                            currentRound++;
+                            initRound();
+                        } else {
+                            gameState = 'FINISHED';
+                            speak(`Fantastic! Game finished. You scored ${score} points!`);
+                        }
+                    }, 1800);
+                } else {
+                    // ตอบผิด: รีเซ็ตแต้ม Streak เหลือ 0
+                    correctStreak = 0;
+                    cursorStatus = 'MISS';
+                    
+                    // พูดคำว่าตอบผิด และตามด้วยการทวนโจทย์ใหม่อัตโนมัติทันทีอย่างชัดเจน
+                    speak(`Oops, try again! Which letter is ${targetLetter}?`);
+                    
+                    resetCardPosition(draggedElement);
+                }
+            } else {
+                resetCardPosition(draggedElement);
+            }
+            draggedElement = null;
+        }
+
+        function resetCardPosition(card) {
+            card.x = card.ox;
+            card.y = card.oy;
+            card.w = card.ow;
+            card.h = card.oh;
+            card.isSnapped = false;
+        }
+
+        // --- Menu Selections & Interaction Handling ---
+        function updateGameLogic() {
+            cursorStatus = 'NORMAL';
+
+            if (gameState === 'START') {
+                buttons.startBtn.x = (canvas.width - buttons.startBtn.w) / 2;
+                buttons.startBtn.y = canvas.height / 2 + 50;
+                if (isHovering(buttons.startBtn)) {
+                    cursorStatus = 'HOVER';
+                    if (isPinching) { gameState = 'SELECT_MODE'; isPinching = false; speak("Select the letter mode."); }
+                }
+            }
+            else if (gameState === 'SELECT_MODE') {
+                let centerY = canvas.height / 2;
+                buttons.modeUpperBtn.x = (canvas.width / 2) - buttons.modeUpperBtn.w - 30;
+                buttons.modeUpperBtn.y = centerY;
+                buttons.modeLowerBtn.x = (canvas.width / 2) + 30;
+                buttons.modeLowerBtn.y = centerY;
+
+                if (isHovering(buttons.modeUpperBtn)) {
+                    cursorStatus = 'HOVER';
+                    if (isPinching) { letterMode = 'UPPER'; gameState = 'SELECT_DIFFICULTY'; isPinching = false; speak("Choose your difficulty."); }
+                }
+                if (isHovering(buttons.modeLowerBtn)) {
+                    cursorStatus = 'HOVER';
+                    if (isPinching) { letterMode = 'LOWER'; gameState = 'SELECT_DIFFICULTY'; isPinching = false; speak("Choose your difficulty."); }
+                }
+            }
+            else if (gameState === 'SELECT_DIFFICULTY') {
+                let totalW = (180 * 3) + (40 * 2);
+                let startX = (canvas.width - totalW) / 2;
+                let centerY = canvas.height / 2 + 20;
+
+                buttons.diffEasyBtn.x = startX;
+                buttons.diffEasyBtn.y = centerY;
+                buttons.diffMedBtn.x = startX + 180 + 40;
+                buttons.diffMedBtn.y = centerY;
+                buttons.diffHardBtn.x = startX + (180 * 2) + (40 * 2);
+                buttons.diffHardBtn.y = centerY;
+
+                if (isHovering(buttons.diffEasyBtn)) {
+                    cursorStatus = 'HOVER';
+                    if (isPinching) { difficulty = 'EASY'; gameState = 'INSTRUCTION'; isPinching = false; speak("Let's look at the instructions."); }
+                }
+                if (isHovering(buttons.diffMedBtn)) {
+                    cursorStatus = 'HOVER';
+                    if (isPinching) { difficulty = 'MEDIUM'; gameState = 'INSTRUCTION'; isPinching = false; speak("Let's look at the instructions."); }
+                }
+                if (isHovering(buttons.diffHardBtn)) {
+                    cursorStatus = 'HOVER';
+                    if (isPinching) { difficulty = 'HARD'; gameState = 'INSTRUCTION'; isPinching = false; speak("Let's look at the instructions."); }
+                }
+            }
+            else if (gameState === 'INSTRUCTION') {
+                buttons.nextBtn.x = (canvas.width - buttons.nextBtn.w) / 2;
+                buttons.nextBtn.y = canvas.height / 2 + 130;
+                if (isHovering(buttons.nextBtn)) {
+                    cursorStatus = 'HOVER';
+                    if (isPinching) {
+                        gameState = 'PLAYING';
+                        score = 0; currentRound = 1; correctStreak = 0; isPinching = false;
+                        initRound();
+                    }
+                }
+            }
+            else if (gameState === 'PLAYING') {
+                buttons.audioBtn.x = 40;
+                buttons.audioBtn.y = 110;
+                
+                dropZone.x = (canvas.width - dropZone.w) / 2;
+                dropZone.y = canvas.height - 240;
+
+                if (isHovering(buttons.audioBtn)) {
+                    cursorStatus = 'HOVER';
+                    if (isPinching) { speak(targetLetter); isPinching = false; }
+                }
+
+                if (isPinching) {
+                    if (!draggedElement) {
+                        for (let card of options) {
+                            if (pointerX > card.x && pointerX < card.x + card.w &&
+                                pointerY > card.y && pointerY < card.y + card.h) {
+                                draggedElement = card;
+                                card.offsetX = pointerX - card.x;
+                                card.offsetY = pointerY - card.y;
+                                break;
+                            }
+                        }
+                        if(!draggedElement && pointerY < canvas.height - 260) cursorStatus = 'MISS';
+                    } else {
+                        draggedElement.x = pointerX - draggedElement.offsetX;
+                        draggedElement.y = pointerY - draggedElement.offsetY;
+                        cursorStatus = 'SUCCESS';
+
+                        let cardCenterX = draggedElement.x + draggedElement.w / 2;
+                        let cardCenterY = draggedElement.y + draggedElement.h / 2;
+                        let zoneCenterX = dropZone.x + dropZone.w / 2;
+                        let zoneCenterY = dropZone.y + dropZone.h / 2;
+                        let dist = Math.sqrt(Math.pow(cardCenterX - zoneCenterX, 2) + Math.pow(cardCenterY - zoneCenterY, 2));
+
+                        if (dist < SNAP_DISTANCE) {
+                            draggedElement.isSnapped = true;
+                            draggedElement.x = dropZone.x;
+                            draggedElement.y = dropZone.y;
+                            draggedElement.w = dropZone.w;
+                            draggedElement.h = dropZone.h;
+                        } else {
+                            if (draggedElement.isSnapped) {
+                                draggedElement.isSnapped = false;
+                                draggedElement.w = draggedElement.ow;
+                                draggedElement.h = draggedElement.oh;
+                            }
+                        }
+                    }
+                } else {
+                    if (draggedElement) checkDropSuccess();
+                }
+
+                if (!draggedElement) {
+                    for (let card of options) {
+                        if (pointerX > card.x && pointerX < card.x + card.w &&
+                            pointerY > card.y && pointerY < card.y + card.h) {
+                            cursorStatus = 'HOVER';
+                        }
+                    }
+                }
+            }
+            else if (gameState === 'FINISHED') {
+                if (isPinching) { gameState = 'START'; isPinching = false; }
+            }
+        }
+
+        function isHovering(btn) {
+            return pointerX > btn.x && pointerX < btn.x + btn.w &&
+                   pointerY > btn.y && pointerY < btn.y + btn.h;
+        }
+
+        // --- Rendering Engine (Draw Loop) ---
+        function drawLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.save();
+            ctx.scale(-1, 1);
+            ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+            ctx.restore();
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (rawHandResults && rawHandResults.multiHandLandmarks && rawHandResults.multiHandLandmarks.length > 0) {
+                handDetected = true;
+                lastHandSeenTime = Date.now();
+                handAlert.classList.add('hidden');
+
+                for (const landmarks of rawHandResults.multiHandLandmarks) {
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                    ctx.lineWidth = 4;
+                    for(let i=0; i<landmarks.length; i++) {
+                        let pt = landmarks[i];
+                        let trueX = canvas.width - (pt.x * canvas.width);
+                        let trueY = pt.y * canvas.height;
+                        
+                        ctx.fillStyle = '#4D96FF';
+                        ctx.beginPath();
+                        ctx.arc(trueX, trueY, 6, 0, 2*Math.PI);
+                        ctx.fill();
+                    }
+                }
+            } else {
+                if (Date.now() - lastHandSeenTime > 2000) {
+                    handDetected = false;
+                    handAlert.classList.remove('hidden');
+                }
+            }
+
+            updateGameLogic();
+
+            if (gameState === 'START') {
+                drawGlassRect((canvas.width - 600)/2, canvas.height/2 - 180, 600, 320);
+                ctx.fillStyle = '#FF4A82';
+                ctx.font = 'bold 50px Fredoka';
+                ctx.textAlign = 'center';
+                ctx.fillText("ABC AR ADVENTURE", canvas.width / 2, canvas.height / 2 - 70);
+                ctx.fillStyle = '#4A4A4A';
+                ctx.font = '22px Fredoka';
+                ctx.fillText("English Alphabet Learning for Kids", canvas.width / 2, canvas.height / 2 - 10);
+                drawButton(buttons.startBtn, '#FF6B6B');
+            } 
+            else if (gameState === 'SELECT_MODE') {
+                drawGlassRect((canvas.width - 650)/2, canvas.height/2 - 180, 650, 340);
+                ctx.fillStyle = '#4D96FF';
+                ctx.font = 'bold 38px Fredoka';
+                ctx.textAlign = 'center';
+                ctx.fillText("Choose Alphabet Mode 🔤", canvas.width / 2, canvas.height / 2 - 80);
+                drawButton(buttons.modeUpperBtn, '#FF6B6B', 48);
+                drawButton(buttons.modeLowerBtn, '#4D96FF', 48);
+            }
+            else if (gameState === 'SELECT_DIFFICULTY') {
+                drawGlassRect((canvas.width - 700)/2, canvas.height/2 - 180, 700, 340);
+                ctx.fillStyle = '#9B51E0';
+                ctx.font = 'bold 38px Fredoka';
+                ctx.textAlign = 'center';
+                ctx.fillText("Select Difficulty Level 🌟", canvas.width / 2, canvas.height / 2 - 80);
+                drawButton(buttons.diffEasyBtn, '#6BCB77');
+                drawButton(buttons.diffMedBtn, '#FFB26B');
+                drawButton(buttons.diffHardBtn, '#FF6B6B');
+            }
+            else if (gameState === 'INSTRUCTION') {
+                drawGlassRect((canvas.width - 720)/2, canvas.height/2 - 220, 720, 440);
+                ctx.fillStyle = '#4D96FF';
+                ctx.font = 'bold 38px Fredoka';
+                ctx.textAlign = 'center';
+                ctx.fillText("How to Play! ✋", canvas.width / 2, canvas.height / 2 - 140);
+                ctx.fillStyle = '#555555';
+                ctx.font = '21px Fredoka';
+                ctx.textAlign = 'left';
+                let startX = canvas.width / 2 - 290;
+                ctx.fillText("1. Show your hand to the webcam or use your mouse.", startX, canvas.height / 2 - 70);
+                ctx.fillText("2. Aim your index finger at the correct letter card.", startX, canvas.height / 2 - 20);
+                ctx.fillText("3. Pinch your thumb and index finger together to grab it.", startX, canvas.height / 2 + 30);
+                ctx.fillText("4. Drag and drop the card into the leaf space below!", startX, canvas.height / 2 + 80);
+                drawButton(buttons.nextBtn, '#6BCB77');
+            } 
+            else if (gameState === 'PLAYING') {
+                drawGlassRect(40, 20, canvas.width - 80, 75);
+                ctx.fillStyle = '#333333';
+                ctx.font = 'bold 24px Fredoka';
+                ctx.textAlign = 'left';
+                ctx.fillText(`Round: ${currentRound} / ${totalRounds}`, 70, 65);
+                
+                // แสดงสถานะ Streak (คอมโบตอบถูกต่อเนื่อง) บนหน้าจอให้เห็นชัดเจน
+                ctx.textAlign = 'right';
+                ctx.fillStyle = '#FF6B6B';
+                let streakText = correctStreak > 0 ? ` (🔥 Streak: ${correctStreak})` : '';
+                ctx.fillText(`Score: ✨ ${score}${streakText}`, canvas.width - 70, 65);
+                
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#4D96FF';
+                ctx.font = 'bold 32px Fredoka';
+                ctx.fillText("Listen to the sound and find the right letter! 🎧", canvas.width / 2, 65);
+
+                drawButton(buttons.audioBtn, '#9B51E0');
+
+                // Draw Drop Zone
+                ctx.lineWidth = 5;
+                ctx.strokeStyle = '#6BCB77';
+                ctx.setLineDash([12, 8]);
+                ctx.fillStyle = 'rgba(107, 203, 119, 0.15)';
+                ctx.beginPath();
+                ctx.roundRect(dropZone.x, dropZone.y, dropZone.w, dropZone.h, 24);
+                ctx.fill();
+                ctx.stroke();
+                ctx.setLineDash([]); 
+
+                ctx.fillStyle = '#2c7a33';
+                ctx.font = 'bold 22px Fredoka';
+                ctx.textAlign = 'center';
+                ctx.fillText("➔ Drop Answer Here 🕳️", dropZone.x + dropZone.w/2, dropZone.y + dropZone.h/2 + 8);
+
+                // Render Cards
+                options.forEach(card => {
+                    if (card !== draggedElement) drawLetterCard(card);
+                });
+                if (draggedElement) drawLetterCard(draggedElement, true);
+            } 
+            else if (gameState === 'FINISHED') {
+                drawGlassRect((canvas.width - 600)/2, canvas.height/2 - 180, 600, 320);
+                ctx.fillStyle = '#6BCB77';
+                ctx.font = 'bold 64px Fredoka';
+                ctx.textAlign = 'center';
+                ctx.fillText("🎉 Success! 🎉", canvas.width / 2, canvas.height / 2 - 50);
+                ctx.fillStyle = '#333333';
+                ctx.font = '32px Fredoka';
+                ctx.fillText(`Your Total Score: ${score} Points`, canvas.width / 2, canvas.height / 2 + 20);
+                ctx.fillStyle = '#888888';
+                ctx.font = '18px Fredoka';
+                ctx.fillText("(Pinch or click anywhere to play again)", canvas.width / 2, canvas.height / 2 + 80);
+            }
+
+            drawCursorFeedback(pointerX, pointerY, cursorStatus);
+            requestAnimationFrame(drawLoop);
+        }
+
+        // --- Graphics Layout Helper Functions ---
+        function drawGlassRect(x, y, w, h) {
+            ctx.save();
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+            ctx.shadowColor = 'rgba(31, 38, 135, 0.1)';
+            ctx.shadowBlur = 20;
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 24);
+            ctx.fill();
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        function drawButton(btn, color, fontSize = 22) {
+            ctx.save();
+            let isHover = isHovering(btn);
+            ctx.fillStyle = color;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = isHover ? 15 : 5;
+            
+            let offset = isHover ? 3 : 0;
+            ctx.beginPath();
+            ctx.roundRect(btn.x - offset, btn.y - offset, btn.w + (offset*2), btn.h + (offset*2), 20);
+            ctx.fill();
+
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${fontSize}px Fredoka`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(btn.text, btn.x + btn.w/2, btn.y + btn.h/2);
+            ctx.restore();
+        }
+
+        function drawLetterCard(card, isDragged = false) {
+            ctx.save();
+            ctx.shadowColor = isDragged ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.12)';
+            ctx.shadowBlur = isDragged ? 25 : 10;
+
+            ctx.fillStyle = card.color;
+            ctx.beginPath();
+            ctx.roundRect(card.x, card.y, card.w, card.h, 20);
+            ctx.fill();
+
+            ctx.lineWidth = card.isSnapped ? 6 : 4;
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.stroke();
+
+            ctx.fillStyle = '#FFFFFF';
+            let dynamicFontSize = Math.floor(card.h * 0.55);
+            ctx.font = `bold ${dynamicFontSize}px Fredoka`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(card.char, card.x + card.w/2, card.y + card.h/2);
+            ctx.restore();
+        }
+
+        function drawCursorFeedback(x, y, status) {
+            ctx.save();
+            ctx.translate(x, y);
+
+            if (status === 'NORMAL') {
+                ctx.fillStyle = 'rgba(255, 74, 130, 0.7)';
+                ctx.beginPath(); ctx.arc(0, 0, 16, 0, 2*Math.PI); ctx.fill();
+                ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke();
+            } 
+            else if (status === 'HOVER') {
+                ctx.strokeStyle = '#FFD93D'; ctx.lineWidth = 4; ctx.setLineDash([4, 4]);
+                ctx.beginPath(); ctx.arc(0, 0, 24, 0, 2*Math.PI); ctx.stroke();
+                ctx.fillStyle = 'rgba(255, 217, 61, 0.5)';
+                ctx.beginPath(); ctx.arc(0, 0, 12, 0, 2*Math.PI); ctx.fill();
+            } 
+            else if (status === 'MISS') {
+                ctx.fillStyle = 'rgba(255, 107, 107, 0.8)';
+                ctx.beginPath(); ctx.arc(0, 0, 20, 0, 2*Math.PI); ctx.fill();
+                ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke();
+            } 
+            else if (status === 'SUCCESS') {
+                ctx.fillStyle = 'rgba(107, 203, 119, 0.9)';
+                ctx.beginPath(); ctx.arc(0, 0, 22, 0, 2*Math.PI); ctx.fill();
+                ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke();
+                ctx.fillStyle = '#FFFFFF'; ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText('✔️', 0, 1);
+            }
+            ctx.restore();
+        }
+
+        // --- MediaPipe Hands Configuration ---
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        hands.onResults((results) => {
+            rawHandResults = results;
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const thumb = landmarks[4];
+                const indexFinger = landmarks[8];
+
+                pointerX = canvas.width - (indexFinger.x * canvas.width);
+                pointerY = indexFinger.y * canvas.height;
+
+                let thumbX = canvas.width - (thumb.x * canvas.width);
+                let thumbY = thumb.y * canvas.height;
+
+                let dx = thumbX - pointerX;
+                let dy = thumbY - pointerY;
+                let distance = Math.sqrt(dx * dx + dy * dy);
+
+                if (distance < 45) {
+                    isPinching = true;
+                } else {
+                    isPinching = false;
+                }
+            } else {
+                if (!isMouseDown) isPinching = false;
+            }
+        });
+
+        const camera = new Camera(video, {
+            onFrame: async () => { await hands.send({ image: video }); },
+            width: 1280,
+            height: 720
+        });
+        
+        camera.start()
+            .then(() => { console.log("Webcam operational."); })
+            .catch(err => { console.error("Camera access error:", err); });
+
+        requestAnimationFrame(drawLoop);
+    </script>
+</body>
+</html>
