@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AR Magic Spelling - เกมสะกดคำมหาสนุก</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- MediaPipe Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Mali:wght@400;600;700&display=swap');
+
+        body {
+            font-family: 'Mali', cursive;
+            margin: 0;
+            overflow: hidden;
+            background-color: #f0fdf4;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        /* Video needs to be mirrored */
+        #webcam {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror camera */
+            z-index: 1;
+        }
+
+        /* Canvas overlays the video */
+        #game-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 10;
+            /* Disable pointer events so DOM underneath can be clicked if needed, 
+               but we handle everything via JS coordinates */
+            touch-action: none; 
+        }
+
+        /* Glassmorphism Styles */
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.4);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 2px solid rgba(255, 255, 255, 0.6);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15);
+            border-radius: 24px;
+        }
+
+        /* 2.5D Button Styles */
+        .btn-25d {
+            transition: all 0.1s ease;
+            box-shadow: 0 6px 0 #047857; /* Darker green bottom */
+            transform: translateY(-6px);
+        }
+        .btn-25d:active, .btn-25d.simulated-active {
+            box-shadow: 0 0px 0 #047857;
+            transform: translateY(0px);
+        }
+
+        .category-card {
+            transition: all 0.2s ease;
+            box-shadow: 0 8px 0 rgba(0,0,0,0.2);
+            transform: translateY(-8px);
+        }
+        .category-card:active, .category-card.simulated-active {
+            box-shadow: 0 0px 0 rgba(0,0,0,0.2);
+            transform: translateY(0px);
+        }
+
+        /* UI Overlays */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 20;
+            pointer-events: none; /* Let clicks pass through to canvas handler */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .pointer-events-auto {
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Camera Video -->
+    <video id="webcam" autoplay playsinline></video>
+    
+    <!-- Game Canvas for Rendering AR, Cards, Cursor -->
+    <canvas id="game-canvas"></canvas>
+
+    <!-- DOM UI Layer (Start, Categories, etc.) -->
+    <div id="ui-layer">
+        
+        <!-- Loading State -->
+        <div id="loading-screen" class="glass-panel p-8 text-center flex flex-col items-center justify-center absolute z-50">
+            <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-green-500 mb-4"></div>
+            <h2 class="text-2xl font-bold text-gray-800">กำลังโหลดระบบ AR...</h2>
+            <p class="text-gray-600 mt-2">โปรดอนุญาตการใช้งานกล้อง</p>
+        </div>
+
+        <!-- Start Screen -->
+        <div id="start-screen" class="hidden flex-col items-center justify-center">
+            <h1 class="text-5xl md:text-7xl font-bold text-white drop-shadow-lg mb-8 text-center" style="-webkit-text-stroke: 2px #4ade80;">Magic Spelling</h1>
+            <button id="btn-start" class="btn-25d ar-clickable pointer-events-auto bg-green-400 hover:bg-green-300 text-white font-bold py-6 px-12 rounded-3xl text-3xl border-4 border-white">
+                START!
+            </button>
+            <p class="mt-8 text-white text-xl drop-shadow-md bg-black/30 px-6 py-2 rounded-full">
+                🖐️ ใช้มือจีบนิ้วเพื่อกดปุ่ม หรือ 🖱️ ใช้เมาส์คลิก
+            </p>
+        </div>
+
+        <!-- Category Screen -->
+        <div id="category-screen" class="hidden flex-col items-center justify-center w-full h-full p-4">
+            <h2 class="text-4xl md:text-5xl font-bold text-white drop-shadow-lg mb-10 text-center bg-blue-500/80 px-8 py-3 rounded-full border-4 border-white">Select Category</h2>
+            <div class="flex flex-wrap justify-center gap-6 md:gap-12 w-full max-w-4xl">
+                <!-- Categories will be injected here via JS -->
+            </div>
+        </div>
+
+        <!-- Instruction / Enter Game Screen -->
+        <div id="instruction-screen" class="hidden flex-col items-center justify-center">
+            <div class="glass-panel p-8 md:p-12 text-center max-w-2xl">
+                <h2 id="selected-cat-title" class="text-4xl font-bold text-blue-600 mb-6">หมวดหมู่</h2>
+                <div class="text-2xl text-gray-700 mb-8 space-y-4">
+                    <p>ฟังเสียงให้ดีๆ แล้วหยิบตัวอักษรมาเรียงให้ถูกต้อง</p>
+                    <p class="text-green-600 font-bold">ใช้นิ้วโป้งจีบกับนิ้วชี้ เพื่อหยิบตัวอักษร!</p>
+                </div>
+                <button id="btn-enter-game" class="btn-25d ar-clickable pointer-events-auto bg-yellow-400 hover:bg-yellow-300 text-yellow-900 font-bold py-5 px-10 rounded-3xl text-2xl border-4 border-white">
+                    Enter The Game!
+                </button>
+            </div>
+        </div>
+
+        <!-- In-Game UI Overlay (Score, Replay button) -->
+        <div id="game-ui" class="hidden absolute top-0 left-0 w-full h-full pointer-events-none">
+            <div class="absolute top-4 left-4 glass-panel px-6 py-3 pointer-events-auto">
+                <span class="text-xl font-bold text-gray-700">คะแนน: <span id="score-display" class="text-3xl text-green-600">0</span></span>
+            </div>
+            <button id="btn-replay-audio" class="ar-clickable pointer-events-auto absolute top-4 right-4 bg-blue-400 hover:bg-blue-300 text-white font-bold p-4 rounded-full border-4 border-white btn-25d shadow-lg">
+                🔊 ฟังอีกครั้ง
+            </button>
+            
+            <button id="btn-home" class="ar-clickable pointer-events-auto absolute bottom-4 left-4 bg-red-400 hover:bg-red-300 text-white font-bold p-4 rounded-full border-4 border-white btn-25d shadow-lg">
+                🏠 กลับหน้าหลัก
+            </button>
+
+            <!-- AI Status Alert -->
+            <div id="ai-status" class="absolute bottom-4 right-4 bg-red-500/80 text-white px-4 py-2 rounded-xl font-bold hidden transition-opacity duration-300">
+                กำลังหามือของคุณ... ✋
+            </div>
+        </div>
+
+        <!-- Game Over Screen -->
+        <div id="game-over-screen" class="hidden flex-col items-center justify-center w-full h-full">
+            <div class="glass-panel p-12 text-center z-50">
+                <h1 class="text-6xl font-bold text-green-500 mb-4 animate-bounce">สำเร็จ! 🎉</h1>
+                <p class="text-3xl text-gray-700 mb-8">คุณได้คะแนนรวม</p>
+                <div class="text-7xl font-bold text-yellow-500 mb-10 drop-shadow-md" id="final-score">0</div>
+                <button id="btn-play-again" class="btn-25d ar-clickable pointer-events-auto bg-blue-500 hover:bg-blue-400 text-white font-bold py-5 px-10 rounded-3xl text-2xl border-4 border-white">
+                    เล่นอีกครั้ง
+                </button>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- Game Data (Updated with new words and categories) ---
+        const gameData = {
+            categories: [
+                { id: 'animals', name: 'Animals', icon: '🦁', color: 'bg-orange-400', words: [
+                    { word: 'ANT', emoji: '🐜', thai: 'มด' },
+                    { word: 'CAT', emoji: '🐱', thai: 'แมว' },
+                    { word: 'DOG', emoji: '🐶', thai: 'สุนัข' },
+                    { word: 'BIRD', emoji: '🐦', thai: 'นก' },
+                    { word: 'FISH', emoji: '🐟', thai: 'ปลา' },
+                    { word: 'PIG', emoji: '🐷', thai: 'หมู' },
+                    { word: 'ZOO', emoji: '🦁', thai: 'สวนสัตว์' }
+                ]},
+                { id: 'body', name: 'Body Parts', icon: '👀', color: 'bg-pink-400', words: [
+                    { word: 'HAND', emoji: '🖐️', thai: 'มือ' },
+                    { word: 'EAR', emoji: '👂', thai: 'หู' },
+                    { word: 'EYE', emoji: '👁️', thai: 'ตา' },
+                    { word: 'LEG', emoji: '🦵', thai: 'ขา' },
+                    { word: 'NOSE', emoji: '👃', thai: 'จมูก' },
+                    { word: 'ARM', emoji: '💪', thai: 'แขน' }
+                ]},
+                { id: 'food', name: 'Food', icon: '🍎', color: 'bg-red-400', words: [
+                    { word: 'APPLE', emoji: '🍎', thai: 'แอปเปิ้ล' },
+                    { word: 'BANANA', emoji: '🍌', thai: 'กล้วย' },
+                    { word: 'ORANGE', emoji: '🍊', thai: 'ส้ม' },
+                    { word: 'MILK', emoji: '🥛', thai: 'นม' }
+                ]},
+                { id: 'mix1', name: 'Mix 1', icon: '🎨', color: 'bg-purple-400', words: [
+                    { word: 'RED', emoji: '🔴', thai: 'สีแดง' },
+                    { word: 'BLUE', emoji: '🔵', thai: 'สีฟ้า' },
+                    { word: 'ONE', emoji: '1️⃣', thai: 'หนึ่ง' },
+                    { word: 'TWO', emoji: '2️⃣', thai: 'สอง' },
+                    { word: 'THREE', emoji: '3️⃣', thai: 'สาม' }
+                ]},
+                { id: 'people', name: 'People & Places', icon: '🏠', color: 'bg-blue-400', words: [
+                    { word: 'TEACHER', emoji: '👩‍🏫', thai: 'คุณครู' },
+                    { word: 'DOCTOR', emoji: '👨‍⚕️', thai: 'หมอ' },
+                    { word: 'STUDENT', emoji: '👦', thai: 'นักเรียน' },
+                    { word: 'HOUSE', emoji: '🏠', thai: 'บ้าน' },
+                    { word: 'KITCHEN', emoji: '🍳', thai: 'ห้องครัว' }
+                ]},
+                { id: 'things', name: 'Nature & Things', icon: '☀️', color: 'bg-yellow-400', words: [
+                    { word: 'SUN', emoji: '☀️', thai: 'ดวงอาทิตย์' },
+                    { word: 'STAR', emoji: '⭐', thai: 'ดาว' },
+                    { word: 'MOON', emoji: '🌙', thai: 'พระจันทร์' },
+                    { word: 'SEA', emoji: '🌊', thai: 'ทะเล' },
+                    { word: 'PEN', emoji: '🖊️', thai: 'ปากกา' },
+                    { word: 'BAG', emoji: '🎒', thai: 'กระเป๋า' },
+                    { word: 'HAT', emoji: '🎩', thai: 'หมวก' },
+                    { word: 'BED', emoji: '🛏️', thai: 'เตียง' }
+                ]}
+            ]
+        };
+
+        const feedbackSounds = {
+            correct: ["Good!", "Great job!", "Amazing!", "Excellent!", "Perfect!", "Wow, Unbelievable!"],
+            wrong: ["Oops, try again!", "Not quite, you can do it!", "Listen carefully."]
+        };
+
+        // --- State Management ---
+        let state = {
+            screen: 'LOADING', 
+            currentCategory: null,
+            currentWordList: [], // List of 5 selected words
+            currentWordIndex: 0,
+            score: 0,
+            streak: 0,
+            startTime: 0,
+            
+            cursor: { x: window.innerWidth/2, y: window.innerHeight/2, isPinching: false, wasPinching: false, status: 'normal', source: 'none' },
+            handLandmarks: null,
+            handDetected: false,
+            lastHandDetectTime: Date.now(),
+
+            cards: [],
+            slots: [],
+            emojiDisplay: { x: 0, y: 0, size: 100, emoji: '' },
+            particles: [],
+
+            isAudioPlaying: false
+        };
+
+        // --- Elements ---
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+        const video = document.getElementById('webcam');
+        const uiScreens = {
+            'LOADING': document.getElementById('loading-screen'),
+            'START': document.getElementById('start-screen'),
+            'CATEGORY': document.getElementById('category-screen'),
+            'INSTRUCTION': document.getElementById('instruction-screen'),
+            'PLAYING': document.getElementById('game-ui'),
+            'GAMEOVER': document.getElementById('game-over-screen')
+        };
+        const aiStatusEl = document.getElementById('ai-status');
+        const scoreEl = document.getElementById('score-display');
+
+        // Resize Canvas
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            if(state.screen === 'PLAYING') initLevelLayout();
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // --- Text to Speech (Narrator) ---
+        let speechSynth = window.speechSynthesis;
+        let femaleUSVoice = null;
+
+        function initVoices() {
+            const voices = speechSynth.getVoices();
+            // Try to find a friendly female US English voice (Google US, Microsoft Zira, etc.)
+            femaleUSVoice = voices.find(v => v.lang.includes('en-US') && (v.name.includes('Female') || v.name.includes('Zira') || v.name.includes('Samantha') || v.name.includes('Google'))) 
+                            || voices.find(v => v.lang.includes('en-US')) 
+                            || voices[0];
+        }
+        if (speechSynthesis.onvoiceschanged !== undefined) {
+            speechSynthesis.onvoiceschanged = initVoices;
+        }
+
+        function speakSequence(wordObj) {
+            if(state.isAudioPlaying) speechSynth.cancel();
+            state.isAudioPlaying = true;
+
+            const word = wordObj.word;
+            const chars = word.split('');
+            const thai = wordObj.thai;
+
+            // 1. Read Word (Normal)
+            const u1 = new SpeechSynthesisUtterance(word);
+            u1.voice = femaleUSVoice;
+            u1.rate = 0.85; 
+
+            speechSynth.speak(u1);
+
+            // 2. Spell out each letter slowly with pauses
+            chars.forEach(char => {
+                // Using comma and spacing to trick the engine into pausing slightly longer
+                const uChar = new SpeechSynthesisUtterance(char + ", ."); 
+                uChar.voice = femaleUSVoice;
+                // Make the letter reading extremely slow and prolonged (~0.2 rate is usually the slowest intelligible)
+                uChar.rate = 0.4; 
+                uChar.pitch = 1.0;
+                speechSynth.speak(uChar);
+            });
+
+            // 3. Read Word Again (Normal)
+            const u3 = new SpeechSynthesisUtterance(word);
+            u3.voice = femaleUSVoice;
+            u3.rate = 0.85;
+            speechSynth.speak(u3);
+
+            // 4. Thai Translation (Very Slow)
+            const u4 = new SpeechSynthesisUtterance(thai);
+            const thaiVoice = speechSynth.getVoices().find(v => v.lang.includes('th')) || femaleUSVoice;
+            u4.voice = thaiVoice;
+            // Slow down the Thai translation significantly
+            u4.rate = 0.5; 
+            u4.onend = () => { state.isAudioPlaying = false; };
+            
+            speechSynth.speak(u4);
+        }
+
+        function speakFeedback(isCorrect) {
+            speechSynth.cancel();
+            let phrase = "";
+            if (isCorrect) {
+                // Increase excitement based on streak
+                const index = Math.min(state.streak, feedbackSounds.correct.length - 1);
+                phrase = feedbackSounds.correct[index];
+            } else {
+                phrase = feedbackSounds.wrong[Math.floor(Math.random() * feedbackSounds.wrong.length)];
+            }
+            const u = new SpeechSynthesisUtterance(phrase);
+            u.voice = femaleUSVoice;
+            u.rate = 0.9;
+            u.pitch = isCorrect ? 1.2 : 0.9; // Higher pitch for correct
+            speechSynth.speak(u);
+            
+            // If wrong, replay the prompt after short delay
+            if(!isCorrect) {
+                u.onend = () => {
+                    setTimeout(() => {
+                        if(state.screen === 'PLAYING') speakSequence(state.currentWordList[state.currentWordIndex]);
+                    }, 500);
+                }
+            }
+        }
+
+        // --- Navigation Logic ---
+        function setScreen(newScreen) {
+            Object.values(uiScreens).forEach(el => el.classList.add('hidden'));
+            uiScreens[newScreen].classList.remove('hidden');
+            if (newScreen === 'START') uiScreens[newScreen].classList.add('flex');
+            if (newScreen === 'CATEGORY') uiScreens[newScreen].classList.add('flex');
+            if (newScreen === 'INSTRUCTION') uiScreens[newScreen].classList.add('flex');
+            if (newScreen === 'GAMEOVER') uiScreens[newScreen].classList.add('flex');
+            
+            state.screen = newScreen;
+
+            if(newScreen === 'CATEGORY') renderCategories();
+            if(newScreen === 'PLAYING') startLevel();
+        }
+
+        function renderCategories() {
+            const container = document.querySelector('#category-screen div');
+            container.innerHTML = '';
+            gameData.categories.forEach((cat, index) => {
+                const btn = document.createElement('div');
+                btn.className = `category-card ar-clickable pointer-events-auto ${cat.color} p-6 md:p-10 rounded-3xl cursor-pointer flex flex-col items-center justify-center border-4 border-white w-40 md:w-56`;
+                btn.innerHTML = `
+                    <div class="text-6xl md:text-8xl mb-4 drop-shadow-lg">${cat.icon}</div>
+                    <div class="text-2xl md:text-3xl font-bold text-white drop-shadow-md">${cat.name}</div>
+                `;
+                // Add DOM click event (fallback) and data attribute for AR click
+                btn.onclick = () => selectCategory(index);
+                btn.dataset.action = 'category';
+                btn.dataset.index = index;
+                container.appendChild(btn);
+            });
+        }
+
+        function selectCategory(index) {
+            state.currentCategory = gameData.categories[index];
+            
+            // Randomly select 5 words for this game session
+            let shuffledWords = [...state.currentCategory.words].sort(() => Math.random() - 0.5);
+            state.currentWordList = shuffledWords.slice(0, 5); // Take up to 5 words
+            
+            state.currentWordIndex = 0;
+            state.score = 0;
+            state.streak = 0;
+            updateScoreDisplay();
+            
+            document.getElementById('selected-cat-title').innerText = `หมวด: ${state.currentCategory.name} ${state.currentCategory.icon}`;
+            setScreen('INSTRUCTION');
+            
+            // Prime audio on user interaction
+            if(speechSynth.getVoices().length === 0) initVoices();
+            let primeMsg = new SpeechSynthesisUtterance("");
+            speechSynth.speak(primeMsg);
+        }
+
+        function updateScoreDisplay() {
+            scoreEl.innerText = state.score;
+        }
+
+        // --- Game Logic (Canvas Entities) ---
+
+        function initLevelLayout() {
+            if(!state.currentCategory || !state.currentWordList.length) return;
+            const wordObj = state.currentWordList[state.currentWordIndex];
+            const word = wordObj.word;
+            const chars = word.split('');
+            
+            state.cards = [];
+            state.slots = [];
+            state.emojiDisplay.emoji = wordObj.emoji;
+
+            const isPortrait = canvas.width < canvas.height;
+            
+            // Layout params (Increased slot size by ~1.5x)
+            const baseSizeMultiplier = isPortrait ? 0.20 : 0.16; // Was 0.15 / 0.12
+            const slotSize = Math.min(canvas.width, canvas.height) * baseSizeMultiplier;
+            const cardSize = slotSize * 0.9;
+            const spacing = slotSize * 1.2;
+            
+            // Center slots perfectly at the bottom (ปรับสูตรคำนวณกึ่งกลางให้แม่นยำ 100%)
+            const startX = (canvas.width / 2) - ((chars.length - 1) * spacing) / 2;
+            const slotsY = canvas.height * 0.82; // Move slightly lower to accommodate larger slots
+            
+            // Position Emoji perfectly at top center
+            const emojiY = canvas.height * 0.18;
+            const emojiX = canvas.width / 2;
+            
+            state.emojiDisplay.x = emojiX;
+            state.emojiDisplay.y = emojiY;
+            state.emojiDisplay.size = isPortrait ? canvas.height * 0.15 : canvas.height * 0.22;
+
+            // Create Slots
+            for(let i=0; i<chars.length; i++) {
+                state.slots.push({
+                    x: startX + (i * spacing),
+                    y: slotsY,
+                    w: slotSize,
+                    h: slotSize,
+                    expectedLetter: chars[i],
+                    isFilled: false,
+                    filledCard: null
+                });
+            }
+
+            // Create Cards (Shuffle them, but arrange in a non-overlapping grid)
+            let shuffledChars = [...chars].sort(() => Math.random() - 0.5);
+            
+            const cardsAreaY = canvas.height * 0.5; // Center of screen vertically
+            
+            // Layout cards in 1 or 2 rows to avoid overlap
+            const maxCardsPerRow = isPortrait ? 4 : 6;
+            const numRows = Math.ceil(shuffledChars.length / maxCardsPerRow);
+            const cardSpacingX = cardSize * 1.3;
+            const cardSpacingY = cardSize * 1.3;
+            
+            const rowStartY = cardsAreaY - ((numRows - 1) * cardSpacingY) / 2;
+
+            for(let i=0; i<shuffledChars.length; i++) {
+                const rowIndex = Math.floor(i / maxCardsPerRow);
+                const colIndex = i % maxCardsPerRow;
+                
+                // Calculate how many cards are in THIS specific row to center them
+                const cardsInThisRow = Math.min(maxCardsPerRow, shuffledChars.length - (rowIndex * maxCardsPerRow));
+                // ปรับสูตรคำนวณกึ่งกลางของการ์ดแต่ละแถวให้ตรงกัน
+                const rowStartX = (canvas.width / 2) - ((cardsInThisRow - 1) * cardSpacingX) / 2;
+                
+                let ox = rowStartX + (colIndex * cardSpacingX);
+                let oy = rowStartY + (rowIndex * cardSpacingY);
+
+                state.cards.push({
+                    id: i,
+                    letter: shuffledChars[i],
+                    x: ox,
+                    y: oy,
+                    originX: ox,
+                    originY: oy,
+                    w: cardSize,
+                    h: cardSize,
+                    isDragging: false,
+                    dragOffsetX: 0,
+                    dragOffsetY: 0,
+                    snappedSlotIndex: -1,
+                    scale: 1,
+                    targetScale: 1
+                });
+            }
+            
+            state.startTime = Date.now();
+        }
+
+        function startLevel() {
+            initLevelLayout();
+            speakSequence(state.currentWordList[state.currentWordIndex]);
+        }
+
+        function checkLevelComplete() {
+            const allFilled = state.slots.every(s => s.isFilled);
+            if(allFilled) {
+                // Add score based on time
+                const timeTaken = (Date.now() - state.startTime) / 1000;
+                let pts = 100;
+                if(timeTaken > 15) pts -= Math.floor(timeTaken - 15) * 2;
+                pts = Math.max(20, pts); // Min 20 pts
+                
+                state.score += pts;
+                state.streak++;
+                updateScoreDisplay();
+                
+                createConfetti(canvas.width/2, canvas.height/2);
+                speakFeedback(true);
+
+                setTimeout(() => {
+                    state.currentWordIndex++;
+                    // Check if we finished the 5 words (or whatever length the list is)
+                    if(state.currentWordIndex >= state.currentWordList.length) {
+                        document.getElementById('final-score').innerText = state.score;
+                        setScreen('GAMEOVER');
+                        const overMsg = new SpeechSynthesisUtterance("Congratulations! You finished the game.");
+                        overMsg.voice = femaleUSVoice;
+                        speechSynth.speak(overMsg);
+                    } else {
+                        startLevel();
+                    }
+                }, 3000);
+            }
+        }
+
+        // --- AR / Mouse Interaction Engine ---
+
+        // Map DOM interactions for AR Cursor
+        function handleARClick(x, y) {
+            // Find elements under cursor. Canvas is full screen, so we need to hide it temporarily or rely on UI layer pointer events
+            // Since UI layer has pointer-events: none, and children have auto, document.elementFromPoint works perfectly.
+            const el = document.elementFromPoint(x, y);
+            
+            if(el && el.classList.contains('ar-clickable')) {
+                // Simulate active state
+                el.classList.add('simulated-active');
+                setTimeout(() => el.classList.remove('simulated-active'), 150);
+                
+                // Trigger action based on ID or Dataset
+                if(el.id === 'btn-start') setScreen('CATEGORY');
+                else if(el.id === 'btn-enter-game') setScreen('PLAYING');
+                else if(el.id === 'btn-replay-audio') speakSequence(state.currentWordList[state.currentWordIndex]);
+                else if(el.id === 'btn-home') setScreen('START');
+                else if(el.id === 'btn-play-again') setScreen('CATEGORY');
+                else if(el.dataset.action === 'category') selectCategory(parseInt(el.dataset.index));
+                
+                return true; // Handled DOM click
+            }
+            return false;
+        }
+
+        // Update Cursor Logic (Called from MediaPipe or Mouse)
+        function updateInteraction() {
+            let hitTarget = false;
+            let currentDragCard = state.cards.find(c => c.isDragging);
+
+            // Handle transition: Pinch START
+            if (state.cursor.isPinching && !state.cursor.wasPinching) {
+                
+                // 1. Check DOM Menus first if not playing
+                if (state.screen !== 'PLAYING') {
+                    if(handleARClick(state.cursor.x, state.cursor.y)) {
+                        state.cursor.status = 'grab';
+                    } else {
+                        state.cursor.status = 'miss';
+                    }
+                    state.cursor.wasPinching = state.cursor.isPinching;
+                    return;
+                }
+
+                // 2. In Game: Check buttons overlay first
+                if(handleARClick(state.cursor.x, state.cursor.y)) {
+                    state.cursor.status = 'grab';
+                    state.cursor.wasPinching = state.cursor.isPinching;
+                    return;
+                }
+
+                // 3. In Game: Check Cards
+                // Find topmost card under cursor
+                let hitCard = null;
+                // Reverse iterate to grab top z-index (last drawn)
+                for (let i = state.cards.length - 1; i >= 0; i--) {
+                    const c = state.cards[i];
+                    // Simple AABB collision
+                    if (state.cursor.x >= c.x - c.w/2 && state.cursor.x <= c.x + c.w/2 &&
+                        state.cursor.y >= c.y - c.h/2 && state.cursor.y <= c.y + c.h/2) {
+                        hitCard = c;
+                        break;
+                    }
+                }
+
+                if (hitCard) {
+                    // Grab it
+                    hitCard.isDragging = true;
+                    // Move to end of array to draw on top
+                    state.cards = state.cards.filter(c => c !== hitCard);
+                    state.cards.push(hitCard);
+                    
+                    // Disconnect from slot if it was snapped
+                    if (hitCard.snappedSlotIndex !== -1) {
+                        state.slots[hitCard.snappedSlotIndex].isFilled = false;
+                        state.slots[hitCard.snappedSlotIndex].filledCard = null;
+                        hitCard.snappedSlotIndex = -1;
+                    }
+                    
+                    hitCard.dragOffsetX = hitCard.x - state.cursor.x;
+                    hitCard.dragOffsetY = hitCard.y - state.cursor.y;
+                    hitCard.targetScale = 1.1; // Enlarge slightly while dragging
+                    
+                    state.cursor.status = 'grab';
+                    hitTarget = true;
+                } else {
+                    state.cursor.status = 'miss';
+                }
+            } 
+            // Handle Holding / Dragging
+            else if (state.cursor.isPinching && state.cursor.wasPinching) {
+                if (currentDragCard) {
+                    // **Requirement 2.5:** Robust tracking. Card follows cursor unconditionally while pinched.
+                    // Lerp position for smoothness, or snap directly
+                    currentDragCard.x = state.cursor.x + currentDragCard.dragOffsetX;
+                    currentDragCard.y = state.cursor.y + currentDragCard.dragOffsetY;
+                    state.cursor.status = 'grab';
+                    hitTarget = true;
+                } else {
+                    state.cursor.status = state.cursor.status === 'grab' ? 'grab' : 'miss'; // Keep miss state if grabbing air
+                }
+            }
+            // Handle Release (Un-pinch)
+            else if (!state.cursor.isPinching && state.cursor.wasPinching) {
+                if (currentDragCard) {
+                    currentDragCard.isDragging = false;
+                    currentDragCard.targetScale = 1.0;
+                    handleCardDrop(currentDragCard);
+                }
+                state.cursor.status = 'normal';
+            }
+            // Hover State Check (Not pinching)
+            else if (!state.cursor.isPinching) {
+                if (state.screen === 'PLAYING') {
+                    let isHovering = false;
+                    for (let c of state.cards) {
+                        if (state.cursor.x >= c.x - c.w/2 && state.cursor.x <= c.x + c.w/2 &&
+                            state.cursor.y >= c.y - c.h/2 && state.cursor.y <= c.y + c.h/2) {
+                            isHovering = true;
+                            break;
+                        }
+                    }
+                    // Also check DOM hover
+                    const el = document.elementFromPoint(state.cursor.x, state.cursor.y);
+                    if(el && el.classList.contains('ar-clickable')) isHovering = true;
+
+                    state.cursor.status = isHovering ? 'hover' : 'normal';
+                }
+            }
+
+            state.cursor.wasPinching = state.cursor.isPinching;
+        }
+
+        // --- Card Dropping / Snapping ---
+        function handleCardDrop(card) {
+            let snapped = false;
+            // Check intersection with all slots
+            for (let i = 0; i < state.slots.length; i++) {
+                const slot = state.slots[i];
+                // Calculate distance between centers
+                const dx = card.x - slot.x;
+                const dy = card.y - slot.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                // Snap threshold (e.g., within 80% of slot width)
+                if (dist < slot.w * 0.8 && !slot.isFilled) {
+                    
+                    // **Requirement 3.11:** Check correct letter immediately
+                    if (card.letter === slot.expectedLetter) {
+                        // Correct!
+                        card.x = slot.x;
+                        card.y = slot.y;
+                        card.snappedSlotIndex = i;
+                        card.targetScale = 1.2; // Enlarge in slot
+                        slot.isFilled = true;
+                        slot.filledCard = card;
+                        snapped = true;
+                        
+                        // Small success effect
+                        createParticles(card.x, card.y, 5, '#4ade80');
+                        break;
+                    } else {
+                        // Wrong letter for this slot!
+                        // Snap back, immediate feedback
+                        state.streak = 0; // Reset streak
+                        speakFeedback(false);
+                        createParticles(card.x, card.y, 10, '#ef4444'); // Red particles
+                        break; // Break and let it return to origin
+                    }
+                }
+            }
+
+            if (!snapped) {
+                // Return to origin (handled by smooth animation in draw loop)
+                card.targetScale = 1.0;
+            }
+
+            // If a card was successfully snapped, check if level is complete
+            if (snapped) {
+                checkLevelComplete();
+            }
+        }
+
+        // --- Mouse / Touch Fallback ---
+        function attachMouseEvents() {
+            const updateMouseCursor = (e, isDown) => {
+                // Only use mouse if AR isn't actively moving (simple arbitration)
+                if(state.cursor.source === 'ar' && state.handDetected) return;
+                
+                // Handle touch or mouse
+                let clientX, clientY;
+                if(e.touches && e.touches.length > 0) {
+                    clientX = e.touches[0].clientX;
+                    clientY = e.touches[0].clientY;
+                } else {
+                    clientX = e.clientX;
+                    clientY = e.clientY;
+                }
+
+                if (clientX !== undefined) {
+                    state.cursor.x = clientX;
+                    state.cursor.y = clientY;
+                    state.cursor.source = 'mouse';
+                }
+                
+                if (isDown !== null) {
+                    state.cursor.isPinching = isDown;
+                }
+            };
+
+            window.addEventListener('mousemove', e => updateMouseCursor(e, null));
+            window.addEventListener('mousedown', e => updateMouseCursor(e, true));
+            window.addEventListener('mouseup', e => updateMouseCursor(e, false));
+            
+            // Touch support
+            window.addEventListener('touchmove', e => updateMouseCursor(e, null), {passive: false});
+            window.addEventListener('touchstart', e => updateMouseCursor(e, true), {passive: false});
+            window.addEventListener('touchend', e => updateMouseCursor(e, false));
+        }
+        attachMouseEvents();
+
+        // --- MediaPipe Hands Setup ---
+        const videoElement = document.getElementById('webcam');
+        
+        function onResults(results) {
+            state.handDetected = (results.multiHandLandmarks && results.multiHandLandmarks.length > 0);
+            
+            if (state.handDetected) {
+                state.lastHandDetectTime = Date.now();
+                state.handLandmarks = results.multiHandLandmarks[0]; // Take first hand
+                
+                const indexTip = state.handLandmarks[8];
+                const thumbTip = state.handLandmarks[4];
+
+                // Convert normalized coordinates to canvas coordinates.
+                // *Crucial*: Invert X because video is mirrored
+                let targetX = (1 - indexTip.x) * canvas.width;
+                let targetY = indexTip.y * canvas.height;
+
+                // Smooth cursor movement (Lerp)
+                state.cursor.x += (targetX - state.cursor.x) * 0.4;
+                state.cursor.y += (targetY - state.cursor.y) * 0.4;
+                state.cursor.source = 'ar';
+
+                // **Requirement 5.3: Pythagoras for distance**
+                // Calculate distance using raw normalized coordinates to be resolution independent
+                const dx = indexTip.x - thumbTip.x;
+                const dy = indexTip.y - thumbTip.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                // Threshold for pinch (adjust based on testing, usually 0.04 - 0.08)
+                state.cursor.isPinching = dist < 0.06;
+            } else {
+                state.handLandmarks = null;
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.65,
+            minTrackingConfidence: 0.65
+        });
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720,
+            facingMode: "user"
+        });
+
+        camera.start()
+            .then(() => {
+                // Hide loading, show start
+                setScreen('START');
+            })
+            .catch(err => {
+                console.error("Camera Error:", err);
+                document.getElementById('loading-screen').innerHTML = `
+                    <h2 class="text-2xl font-bold text-red-600 mb-4">ไม่สามารถเปิดกล้องได้</h2>
+                    <p class="text-gray-700 mb-4">กรุณาอนุญาตการใช้กล้อง หรือใช้เมาส์เล่นแทน</p>
+                    <button class="bg-blue-500 text-white px-6 py-2 rounded-xl" onclick="setScreen('START')">เข้าสู่เกม</button>
+                `;
+            });
+
+        // --- Visual Effects ---
+        function createParticles(x, y, count, color) {
+            for(let i=0; i<count; i++) {
+                state.particles.push({
+                    x: x, y: y,
+                    vx: (Math.random() - 0.5) * 10,
+                    vy: (Math.random() - 0.5) * 10,
+                    life: 1.0,
+                    color: color
+                });
+            }
+        }
+        function createConfetti(x, y) {
+            const colors = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6'];
+            for(let i=0; i<50; i++) {
+                createParticles(x, y, 1, colors[Math.floor(Math.random() * colors.length)]);
+            }
+        }
+
+        // --- Render Loop (Canvas) ---
+        function drawRoundedRect(ctx, x, y, w, h, r, fill, stroke) {
+            ctx.beginPath();
+            ctx.moveTo(x + r, y);
+            ctx.lineTo(x + w - r, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+            ctx.lineTo(x + w, y + h - r);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+            ctx.lineTo(x + r, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+            ctx.lineTo(x, y + r);
+            ctx.quadraticCurveTo(x, y, x + r, y);
+            ctx.closePath();
+            if(fill) { ctx.fillStyle = fill; ctx.fill(); }
+            if(stroke) { ctx.lineWidth = 3; ctx.strokeStyle = stroke; ctx.stroke(); }
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // AI Status Warning Check
+            if (state.screen === 'PLAYING') {
+                if (Date.now() - state.lastHandDetectTime > 2000) {
+                    aiStatusEl.classList.remove('hidden');
+                } else {
+                    aiStatusEl.classList.add('hidden');
+                }
+            }
+
+            // Execute game logic and interactions
+            updateInteraction();
+
+            if (state.screen === 'PLAYING') {
+                // 1. Draw Emoji (2.5D Style - Positioned Top Center)
+                const em = state.emojiDisplay;
+                ctx.save();
+                ctx.translate(em.x, em.y);
+                // Base shadow
+                drawRoundedRect(ctx, -em.size/2, -em.size/2 + 10, em.size, em.size, 30, 'rgba(0,0,0,0.1)');
+                // Panel
+                drawRoundedRect(ctx, -em.size/2, -em.size/2, em.size, em.size, 30, 'rgba(255,255,255,0.7)', 'white');
+                // Text
+                ctx.font = `${em.size * 0.6}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(em.emoji, 0, 5); // Slight offset
+                ctx.restore();
+
+                // 2. Draw Slots
+                state.slots.forEach(slot => {
+                    ctx.save();
+                    ctx.translate(slot.x, slot.y);
+                    // Empty slot style (dashed)
+                    ctx.setLineDash([10, 10]);
+                    drawRoundedRect(ctx, -slot.w/2, -slot.h/2, slot.w, slot.h, 20, 'rgba(255,255,255,0.3)', 'rgba(0,0,0,0.2)');
+                    
+                    // Draw guide letter faintly
+                    if (!slot.isFilled) {
+                        ctx.font = `bold ${slot.h * 0.5}px 'Mali'`;
+                        ctx.fillStyle = 'rgba(0,0,0,0.1)';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(slot.expectedLetter, 0, 5);
+                    }
+                    ctx.restore();
+                });
+
+                // 3. Draw Cards
+                state.cards.forEach(card => {
+                    // Smooth scaling and movement back to origin if not snapped/dragged
+                    card.scale += (card.targetScale - card.scale) * 0.2;
+                    if(!card.isDragging && card.snappedSlotIndex === -1) {
+                        card.x += (card.originX - card.x) * 0.15;
+                        card.y += (card.originY - card.y) * 0.15;
+                    }
+
+                    ctx.save();
+                    ctx.translate(card.x, card.y);
+                    ctx.scale(card.scale, card.scale);
+                    
+                    const w = card.w;
+                    const h = card.h;
+                    
+                    // 2.5D Effect: Bottom shadow/depth
+                    const depth = card.isDragging ? 12 : (card.snappedSlotIndex !== -1 ? 0 : 6);
+                    
+                    drawRoundedRect(ctx, -w/2, -h/2 + depth, w, h, 16, '#ca8a04'); // Dark Yellow
+                    // Top face
+                    drawRoundedRect(ctx, -w/2, -h/2, w, h, 16, '#fef08a', 'white'); // Light Yellow
+                    
+                    // Letter
+                    ctx.font = `bold ${h * 0.6}px 'Mali'`;
+                    ctx.fillStyle = '#854d0e';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(card.letter, 0, 5);
+                    
+                    ctx.restore();
+                });
+
+                // 4. Draw Particles
+                for (let i = state.particles.length - 1; i >= 0; i--) {
+                    let p = state.particles[i];
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    p.vy += 0.2; // gravity
+                    p.life -= 0.02;
+                    
+                    if (p.life <= 0) {
+                        state.particles.splice(i, 1);
+                        continue;
+                    }
+                    
+                    ctx.globalAlpha = p.life;
+                    ctx.fillStyle = p.color;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 8, 0, Math.PI*2);
+                    ctx.fill();
+                    ctx.globalAlpha = 1.0;
+                }
+            }
+
+            // 5. Draw Hand Skeleton (if AR)
+            if (state.handLandmarks && state.handDetected) {
+                ctx.save();
+                // We need to mirror drawing of landmarks because we inverted the X logic for interaction
+                ctx.scale(-1, 1);
+                ctx.translate(-canvas.width, 0);
+                
+                // Draw connectons faint
+                drawConnectors(ctx, state.handLandmarks, HAND_CONNECTIONS, {color: 'rgba(255,255,255,0.3)', lineWidth: 3});
+                drawLandmarks(ctx, state.handLandmarks, {color: 'rgba(74, 222, 128, 0.5)', lineWidth: 1, radius: 2});
+                ctx.restore();
+            }
+
+            // 6. Draw Custom Cursor
+            // **Requirement 4: Cursor Feedback States**
+            ctx.save();
+            ctx.translate(state.cursor.x, state.cursor.y);
+            
+            ctx.lineWidth = 4;
+            switch(state.cursor.status) {
+                case 'normal':
+                    ctx.strokeStyle = '#3b82f6'; // ฟ้า
+                    ctx.fillStyle = 'rgba(59, 130, 246, 0.3)';
+                    ctx.setLineDash([]);
+                    ctx.beginPath(); ctx.arc(0, 0, 15, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+                    break;
+                case 'hover':
+                    ctx.strokeStyle = '#eab308'; // เหลือง
+                    ctx.fillStyle = 'transparent';
+                    ctx.setLineDash([5, 5]);
+                    ctx.beginPath(); ctx.arc(0, 0, 25, 0, Math.PI*2); ctx.stroke();
+                    break;
+                case 'miss':
+                    ctx.strokeStyle = '#ef4444'; // แดง
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
+                    ctx.setLineDash([]);
+                    ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+                    break;
+                case 'grab':
+                    ctx.strokeStyle = '#22c55e'; // เขียว
+                    ctx.fillStyle = 'rgba(34, 197, 94, 0.5)';
+                    ctx.setLineDash([]);
+                    ctx.beginPath(); ctx.arc(0, 0, 18, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+                    // Draw ✔️
+                    ctx.fillStyle = 'white';
+                    ctx.font = '20px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText('✔️', 0, 0);
+                    break;
+            }
+            ctx.restore();
+
+            requestAnimationFrame(render);
+        }
+
+        // Start render loop
+        requestAnimationFrame(render);
+
+    </script>
+</body>
+</html>
